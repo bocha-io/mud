@@ -68,31 +68,30 @@ export async function deploy(
   // Deploy World
   const worldPromise = {
     World: worldAddress
-      ? Promise.resolve(worldAddress)
+      ? worldAddress
       : worldContractName
-      ? deployContractByName(worldContractName)
-      : deployContract(IBaseWorldData.abi, WorldData.bytecode, "World"),
+      ? await deployContractByName(worldContractName)
+      : await deployContract(IBaseWorldData.abi, WorldData.bytecode, "World"),
   };
 
   // Deploy Systems
-  const systemPromises = Object.keys(resolvedConfig.systems).reduce<Record<string, Promise<string>>>(
-    (acc, systemName) => {
-      acc[systemName] = deployContractByName(systemName);
-      return acc;
-    },
-    {}
-  );
+  const systemPromises: Record<string, string> = {};
+  const keys = Object.keys(resolvedConfig.systems);
+  for (const systemName of keys) {
+    const value = await deployContractByName(systemName);
+    systemPromises[systemName] = value;
+  }
 
   // Deploy default World modules
-  const defaultModules: Record<string, Promise<string>> = {
+  const defaultModules: Record<string, string> = {
     // TODO: these only need to be deployed once per chain, add a check if they exist already
-    CoreModule: deployContract(CoreModuleData.abi, CoreModuleData.bytecode, "CoreModule"),
-    KeysWithValueModule: deployContract(
+    CoreModule: await deployContract(CoreModuleData.abi, CoreModuleData.bytecode, "CoreModule"),
+    KeysWithValueModule: await deployContract(
       KeysWithValueModuleData.abi,
       KeysWithValueModuleData.bytecode,
       "KeysWithValueModule"
     ),
-    UniqueEntityModule: deployContract(
+    UniqueEntityModule: await deployContract(
       UniqueEntityModuleData.abi,
       UniqueEntityModuleData.bytecode,
       "UniqueEntityModule"
@@ -100,23 +99,23 @@ export async function deploy(
   };
 
   // Deploy user Modules
-  const modulePromises = mudConfig.modules
-    .filter((module) => !defaultModules[module.name]) // Only deploy user modules here, not default modules
-    .reduce<Record<string, Promise<string>>>((acc, module) => {
-      acc[module.name] = deployContractByName(module.name);
-      return acc;
-    }, defaultModules);
+  const userModules = mudConfig.modules.filter((module) => !defaultModules[module.name]); // Only deploy user modules here, not default modules
+  for (const module of userModules) {
+    defaultModules[module.name] = await deployContractByName(module.name);
+  }
+
+  const modulePromises = defaultModules;
 
   // Combine all contracts into one object
-  const contractPromises: Record<string, Promise<string>> = { ...worldPromise, ...systemPromises, ...modulePromises };
+  const contractPromises: Record<string, string> = { ...worldPromise, ...systemPromises, ...modulePromises };
 
   // Create World contract instance from deployed address
-  const WorldContract = new ethers.Contract(await contractPromises.World, IBaseWorldData.abi, signer) as IBaseWorld;
+  const WorldContract = new ethers.Contract(contractPromises.World, IBaseWorldData.abi, signer) as IBaseWorld;
 
   // Install core Modules
   if (!worldAddress) {
     console.log(chalk.blue("Installing core World modules"));
-    await fastTxExecute(WorldContract, "installRootModule", [await modulePromises.CoreModule, "0x"]);
+    await fastTxExecute(WorldContract, "installRootModule", [modulePromises.CoreModule, "0x"]);
     console.log(chalk.green("Installed core World modules"));
   }
 
@@ -173,7 +172,7 @@ export async function deploy(
         await fastTxExecute(WorldContract, "registerSystem", [
           toBytes16(namespace),
           toBytes16(name),
-          await contractPromises[systemName],
+          contractPromises[systemName],
           openAccess,
         ]);
         console.log(chalk.green(`Registered system ${systemName} at ${namespace}/${name}`));
@@ -245,7 +244,7 @@ export async function deploy(
         await fastTxExecute(WorldContract, "grantAccess", [
           toBytes16(namespace),
           toBytes16(name),
-          await contractPromises[granteeSystem],
+          contractPromises[granteeSystem],
         ]);
         console.log(chalk.green(`Granted ${granteeSystem} access to ${systemName} (${resourceSelector})`));
       }),
@@ -267,7 +266,7 @@ export async function deploy(
       );
       const values = resolvedArgs.map((arg) => arg.value);
       const types = resolvedArgs.map((arg) => arg.type);
-      const moduleAddress = await contractPromises[module.name];
+      const moduleAddress = contractPromises[module.name];
       if (!moduleAddress) throw new Error(`Module ${module.name} not found`);
 
       // Send transaction to install module
@@ -294,11 +293,12 @@ export async function deploy(
         postDeployScript,
         "--sig",
         "run(address)",
-        await contractPromises.World,
+        contractPromises.World,
         "--broadcast",
         "--rpc-url",
         rpc,
         "-vvv",
+        "--slow",
       ],
       {
         profile,
@@ -310,7 +310,7 @@ export async function deploy(
 
   console.log(chalk.green("Deployment completed in", (Date.now() - startTime) / 1000, "seconds"));
 
-  return { worldAddress: await contractPromises.World, blockNumber };
+  return { worldAddress: contractPromises.World, blockNumber };
 
   // ------------------- INTERNAL FUNCTIONS -------------------
   // (Inlined to avoid having to pass around nonce, signer and forgeOutDir)
@@ -324,7 +324,7 @@ export async function deploy(
     console.log(chalk.blue("Deploying", contractName));
 
     const { abi, bytecode } = await getContractData(contractName);
-    return deployContract(abi, bytecode, contractName);
+    return await deployContract(abi, bytecode, contractName);
   }
 
   /**
@@ -348,8 +348,10 @@ export async function deploy(
         maxPriorityFeePerGas,
         maxFeePerGas,
       });
-      promises.push(deployPromise);
-      const { address } = await deployPromise;
+      const res = await deployPromise;
+      // Wait for 1 confirmation
+      await res.deployTransaction.wait(1);
+      const { address } = res;
 
       console.log(chalk.green("Deployed", contractName, "to", address));
       return address;
@@ -359,7 +361,7 @@ export async function deploy(
         // If the deployment failed because the transaction was already imported,
         // retry with a higher priority fee
         setInternalFeePerGas(priorityFeeMultiplier * 1.1);
-        return deployContract(abi, bytecode, contractName, retryCount++);
+        return await deployContract(abi, bytecode, contractName, retryCount++);
       } else if (error?.message.includes("invalid bytecode")) {
         throw new MUDError(
           `Error deploying ${contractName}: invalid bytecode. Note that linking of public libraries is not supported yet, make sure none of your libraries use "external" functions.`
@@ -430,18 +432,20 @@ export async function deploy(
     try {
       const gasLimit = await contract.estimateGas[func].apply(null, args);
       console.log(chalk.gray(`executing transaction: ${functionName} with nonce ${nonce}`));
-      const txPromise = contract[func]
-        .apply(null, [...args, { gasLimit, nonce: nonce++, maxPriorityFeePerGas, maxFeePerGas }])
-        .then((tx: any) => tx.wait(confirmations));
-      promises.push(txPromise);
-      return txPromise;
+      const tx = await contract[func].apply(null, [
+        ...args,
+        { gasLimit, nonce: nonce++, maxPriorityFeePerGas, maxFeePerGas },
+      ]);
+      await tx.wait(confirmations);
+
+      return tx;
     } catch (error: any) {
       if (debug) console.error(error);
       if (retryCount === 0 && error?.message.includes("transaction already imported")) {
         // If the deployment failed because the transaction was already imported,
         // retry with a higher priority fee
         setInternalFeePerGas(priorityFeeMultiplier * 1.1);
-        return fastTxExecute(contract, func, args, retryCount++, confirmations);
+        return await fastTxExecute(contract, func, args, retryCount++, confirmations);
       } else throw new MUDError(`Gas estimation error for ${functionName}: ${error?.reason}`);
     }
   }

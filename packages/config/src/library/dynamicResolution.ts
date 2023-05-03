@@ -35,7 +35,7 @@ export function isDynamicResolution(value: unknown): value is DynamicResolution 
  */
 export async function resolveWithContext(
   unresolved: any,
-  context: { systemAddresses?: Record<string, Promise<string>>; tableIds?: Record<string, Uint8Array> }
+  context: { systemAddresses?: Record<string, string>; tableIds?: Record<string, Uint8Array> }
 ): Promise<ValueWithType> {
   if (!isDynamicResolution(unresolved)) return unresolved;
   let resolved: ValueWithType | undefined = undefined;
