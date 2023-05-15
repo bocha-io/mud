@@ -6,7 +6,7 @@ chains:
       http: "http://localhost:8545"
       ws: "ws://localhost:8545"
 db:
-  dsn: "postgresql://localhost:5432/mode_ephemeral?sslmode=disable&replication=database"
+  dsn: "postgresql://postgres:password@localhost:5432/mode_ephemeral?sslmode=disable&replication=database"
   wipe: false
 sync:
   enabled: true
